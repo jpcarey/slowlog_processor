@@ -1,0 +1,235 @@
+#!/usr/bin/env python
+from datetime import datetime
+from itertools import zip_longest
+from contextlib import ExitStack
+import json
+import re
+import hashlib
+import os
+import glob
+import argparse
+
+parser = argparse.ArgumentParser(
+    description='script to check the number of fields in elasticsearch'
+)
+parser.add_argument('--debug',
+    action='store_true',
+    help='foo'
+)
+parser.add_argument('--paths',
+    action='store',
+    type=str,
+    default='/Users/jared/Downloads/smartprocure_dv3_index_search_slowlog-8_elastic-data-nodes_20170131-1150/*',
+    help='paths / glob pattern to get slowlogs'
+)
+parser.add_argument('--filter_ids',
+    action='store',
+    type=str,
+    default=False,
+    help=''
+)
+
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+
+args = parser.parse_args()
+
+print(bcolors.OKGREEN, "Some text", bcolors.ENDC)
+
+aggs = dict()
+done = dict()
+
+paths = args.paths
+# paths = tuple(args.paths.strip(",").split(","))
+# path_arg = "/Users/jared/Downloads/smartprocure_dv3_index_search_slowlog-8_elastic-data-nodes_20170209-2238/*"
+# path_arg = "/Users/jared/Downloads/smartprocure_dv3_index_search_slowlog-8_elastic-data-nodes_20170131-1150/*"
+filenames = [logfile for logfile in glob.glob(paths) if not os.path.isdir(logfile)]
+
+filter_ids = tuple(args.filter_ids.strip(",").split(","))
+
+
+# TODO: parse from arg, test and tidy up logic for calculating offset
+nodes_stats = '/Users/jared/Downloads/diagnostics-20170216-151640/nodes_stats.json'
+
+DATE_FORMATS = ['%m/%d/%Y %I:%M:%S %p', '%Y/%m/%d %H:%M:%S', '%d/%m/%Y %H:%M', '%m/%d/%Y', '%Y/%m/%d']
+# filter_ids = ('f5d2902a35cda02af18a93705e178eda')
+
+
+def time_align(file):
+    # calculates timeoffsets from master node, sourced from nodes_stats diag
+    with open(file) as json_data:
+        d = json.load(json_data)
+        master = dict(((k,v) for k,v in d["nodes"].items()
+                if v["attributes"]["master"] == 'true'))
+        master_t = next (iter (master.values()))['os']['timestamp']
+        diffs = dict()
+        for k,v in d["nodes"].items():
+            diffs[v['name']] = master_t - v['os']['timestamp']
+        return diffs
+        # master node: nodes.CiWerDP5Taina2AZarDVKQ.attributes.master = true
+        # "nodes.CiWerDP5Taina2AZarDVKQ.timestamp": 1487258197396,
+        # "nodes.CiWerDP5Taina2AZarDVKQ.os.timestamp": 1487258197396,
+        # "nodes.CiWerDP5Taina2AZarDVKQ.process.timestamp": 1487258197396,
+        # "nodes.CiWerDP5Taina2AZarDVKQ.jvm.timestamp": 1487258197397,
+        # "nodes.CiWerDP5Taina2AZarDVKQ.fs.timestamp": 1487258197397,
+
+
+def parse_date(s,fmts):
+    # skeleton code for now, need to decided how I want to filter dates
+    test_date = '2012/1/1 12:32:11'
+    for f in fmts:
+        try:
+            return datetime.strptime(s, f)
+        except ValueError:
+            pass
+
+
+def filter(f):
+    # called as log lines are iterated.
+    try:
+        # filter for query md5 values
+        if ( f['md5'] not in (filter_ids)): #and
+                # f['ts_millis'] not in range( int(1485905784078/1000), int(datetime.utcnow().timestamp()) )):
+            raise ValueError('message did not match filter')
+    except NameError:
+        pass
+
+
+def create_agg(e):
+    # creates the base aggregated event
+    event = {
+        'ts': e['ts_millis'],
+        'ts_s': [ e['ts_millis'] ],
+        'md5': e['md5'],
+        'datestamps': [ e['datestamp'] ],
+        'loglevel': e['loglevel'],
+        'slowlog_type': e['slowlog_type'],
+        'hosts': [ e['host'] ],
+        'index': e['index'],
+        'shards': [ e['shard'] ],
+        'tooks': [ e['took'] ],
+        'tooks_millis': [ e['took_millis'] ],
+        'types': e['types'],
+        'stats': e['stats'],
+        'search_type': e['search_type'],
+        'total_shards': e['total_shards'],
+        'query': e['query'],
+        'extra_source': e['extra_source'],
+        'shards_n': 1,
+        'tooks_min': e['took_millis'],
+        'tooks_max': e['took_millis'],
+        'ts_min': e['ts_millis'],
+        'ts_max': e['ts_millis']
+    }
+    return event
+
+
+def grok(line):
+# [2017-02-10 03:35:21,997][TRACE][index.search.slowlog.query] [172.16.0.15] [sp-data-20170124][7] took[5.9s], took_millis[5987], types[line-item-type], stats[], search_type[QUERY_THEN_FETCH], total_shards[32], source[{"query":{"match_all":{} },"size":0}], extra_source[{"timeout":90000}],
+    regex = re.compile(
+        r'^\[(?P<datestamp>.*?)\]'
+        r'\[(?P<loglevel>.*?)\]'
+        r'\[index.search.slowlog.(?P<slowlog_type>.*?)\]\s?'
+        r'\[(?P<host>.*?)\]\s?'
+        r'\[(?P<index>.*?)\]'
+        r'\[(?P<shard>\d+)\]\s?took'
+        r'\[(?P<took>.*?)\],\s?took_millis'
+        r'\[(?P<took_millis>\d+)\],\s?types'
+        r'\[(?P<types>.*?)\],\s?stats'
+        r'\[(?P<stats>.*?)\], search_type'
+        r'\[(?P<search_type>.*?)\],\s?total_shards'
+        r'\[(?P<total_shards>\d+)\],\s?source'
+        r'\[(?P<query>.*?)\],\s?extra_source'
+        r'\[(?P<extra_source>.*?)\],?'
+    )
+
+    m = re.search(regex, line)
+    l = m.groupdict()
+
+    l['md5'] = hashlib.md5(( l['query'] ).encode('utf-8')).hexdigest()
+    l['uid'] = l['md5'] + l['slowlog_type']
+
+    l['datetime_object'] = datetime.strptime( l['datestamp'], '%Y-%m-%d %H:%M:%S,%f')
+    # I might opt to store the original value before offset, or just the offset.
+    if nodes_stats:
+        l['ts_millis'] = int( l['datetime_object'].timestamp() * 1000 ) - diffs[l['host']]
+    else:
+        l['ts_millis'] = int( l['datetime_object'].timestamp() * 1000 )
+    return l
+
+def read_logs():
+    with ExitStack() as stack:
+        handles = [stack.enter_context(open(file)) for file in filenames]
+        for line in (line for tuple in zip_longest(*handles) for line in tuple if line):
+            try:
+                l = grok(line.strip())
+                # make the filter smarter
+                filter(l)
+            except ValueError:
+                continue
+
+            uid = l['uid']
+            if uid in aggs:
+                # expand the window based upon the total time the current query took
+                threshold = 10000 if int( l['took_millis'] ) < 10000 else int( l['took_millis'] )
+                default_value = (False, False)
+                i,m = next(((i,x) for i, x in enumerate(aggs[uid])
+                            if l['ts_millis'] in range( x['ts_min']-threshold, x['ts_max']+threshold)), default_value)
+                if m == False:
+                    # no matching event within time window
+                    aggs[uid].append( create_agg(l) )
+                else:
+                    aggs[uid][i]['ts_s'].append( l['ts_millis'] )
+                    aggs[uid][i]['datestamps'].append( l['datestamp'] )
+                    aggs[uid][i]['hosts'].append( l['host'] )
+                    aggs[uid][i]['shards'].append( l['shard'] )
+                    aggs[uid][i]['tooks'].append( l['took'] )
+                    aggs[uid][i]['tooks_millis'].append( l['took_millis'] )
+                    aggs[uid][i]['shards_n'] =  len( aggs[uid][i]['shards'] )
+                    aggs[uid][i]['tooks_min'] = min( aggs[uid][i]['tooks_millis'] )
+                    aggs[uid][i]['tooks_max'] = max( aggs[uid][i]['tooks_millis'] )
+                    aggs[uid][i]['ts_min'] =    min( aggs[uid][i]['ts_s'] )
+                    aggs[uid][i]['ts_max'] =    max( aggs[uid][i]['ts_s'] )
+                    # check if max number of shards has been reached
+                    if int(aggs[uid][i]['shards_n']) == int(aggs[uid][i]['total_shards']):
+                        fin = aggs[uid].pop(i)
+                        done.setdefault(uid, []).append(fin)
+            else:
+                # new event
+                aggs[uid] = [ create_agg(l) ]
+
+
+def printer():
+    # just printing things. Not great, and move to function
+    # should read from conf fields to print, or allow comma separated fields.
+    for i in (aggs.items(), done.items()):
+        for key, value in i:
+            # if len(value) > 2:
+            for i in value:
+                if i['slowlog_type'] == 'query':
+                    span = (max( i['ts_s'] ) - min( i['ts_s'] ))/1000
+                    time = "%s   %s" % (max(i['datestamps'])[11:], min(i['datestamps'])[11:])
+                    print('{:35s} {:5s} {:5} {:>10.3f} {:>30} {}'.format(
+                                                                i['md5'],
+                                                                i['slowlog_type'],
+                                                                i['shards_n'],
+                                                                span,
+                                                                time,
+                                                                i['ts']
+                                                                ))
+    print(len(done.keys()))
+    print(len(aggs.keys()))
+
+
+if __name__== "__main__":
+    # hack for testing, will not work. Calls time_align to get offsets.
+    if nodes_stats:
+        diffs = time_align(nodes_stats)
+
+    read_logs()
+    printer()

@@ -1,0 +1,144 @@
+#!/usr/bin/env python
+from pprint import pprint
+
+from datetime import datetime
+# python 2
+# from itertools import izip_longest
+# from contextlib import nested
+# python 3
+from itertools import zip_longest
+from contextlib import ExitStack
+import json
+import re
+import hashlib
+import os
+import glob
+
+aggs = {}
+done = {}
+
+# path_arg = "/Users/jared/Downloads/smartprocure_dv3_index_search_slowlog-8_elastic-data-nodes_20170209-2238/trim/*"
+# path_arg = "/Users/jared/Downloads/smartprocure_dv3_index_search_slowlog-8_elastic-data-nodes_20170209-2238/*"
+path_arg = "/Users/jared/Downloads/smartprocure_dv3_index_search_slowlog-8_elastic-data-nodes_20170131-1150/*"
+filenames = [log for log in glob.glob(path_arg) if not os.path.isdir(log)]
+
+def create_agg(e):
+    event = {
+        'ts': e['ts_millis'],
+        'ts_s': [ e['ts_millis'] ],
+        'md5': e['md5'],
+        'datestamps': [ e['datestamp'] ],
+        'loglevel': e['loglevel'],
+        'slowlog_type': e['slowlog_type'],
+        'hosts': [ e['host'] ],
+        'index': e['index'],
+        'shards': [ e['shard'] ],
+        'tooks': [ e['took'] ],
+        'tooks_millis': [ e['took_millis'] ],
+        'types': e['types'],
+        'stats': e['stats'],
+        'search_type': e['search_type'],
+        'total_shards': e['total_shards'],
+        'query': e['query'],
+        'extra_source': e['extra_source'],
+        'shards_n': 1,
+        'tooks_min': e['took_millis'],
+        'tooks_max': e['took_millis']
+    }
+    return event
+
+def grok(line):
+# [2017-02-10 03:35:21,997][TRACE][index.search.slowlog.query] [172.16.0.15] [sp-data-20170124][7] took[5.9s], took_millis[5987], types[line-item-type], stats[], search_type[QUERY_THEN_FETCH], total_shards[32], source[{"query":{"match_all":{} },"size":0}], extra_source[{"timeout":90000}],
+    regex = re.compile(
+        r'^\[(?P<datestamp>.*?)\]'
+        r'\[(?P<loglevel>.*?)\]'
+        r'\[index.search.slowlog.(?P<slowlog_type>.*?)\]\s?'
+        r'\[(?P<host>.*?)\]\s?'
+        r'\[(?P<index>.*?)\]'
+        r'\[(?P<shard>\d+)\]\s?took'
+        r'\[(?P<took>.*?)\],\s?took_millis'
+        r'\[(?P<took_millis>\d+)\],\s?types'
+        r'\[(?P<types>.*?)\],\s?stats'
+        r'\[(?P<stats>.*?)\], search_type'
+        r'\[(?P<search_type>.*?)\],\s?total_shards'
+        r'\[(?P<total_shards>\d+)\],\s?source'
+        r'\[(?P<query>.*?)\],\s?extra_source'
+        r'\[(?P<extra_source>.*?)\],?'
+    )
+
+    m = re.search(regex, line)
+    l = m.groupdict()
+
+    l['datetime_object'] = datetime.strptime(l['datestamp'], '%Y-%m-%d %H:%M:%S,%f')
+    l['ts_millis'] = int(l['datetime_object'].timestamp() * 1000)
+    l['md5'] = hashlib.md5((l['query']).encode('utf-8')).hexdigest()
+    l['uid'] = l['md5'] + l['slowlog_type']
+    
+    return l
+
+# python 3
+with ExitStack() as stack:
+    handles = [stack.enter_context(open(file)) for file in filenames]
+    for line in (line for tuple in zip_longest(*handles) for line in tuple if line):
+        # print(line.strip())
+        l = grok(line.strip())
+        uid = l['uid']
+        if uid in aggs:
+            # expand the window based upon the total time the current query took
+            threshold = 10000 if int(l['took_millis']) < 10000 else int(l['took_millis'])
+            default_value = (False, False)
+            i,m = next(((i,x) for i, x in enumerate(aggs[uid])
+                        if l['ts_millis'] in range(x['ts']-threshold, x['ts']+threshold)), default_value)
+            if m == False:
+                # no matching event within time window
+                aggs[uid].append( create_agg(l) )
+            else:
+                aggs[uid][i]['ts_s'].append( l['ts_millis'] )
+                aggs[uid][i]['datestamps'].append( l['datestamp'] )
+                aggs[uid][i]['hosts'].append( l['host'] )
+                aggs[uid][i]['shards'].append( l['shard'] )
+                aggs[uid][i]['tooks'].append( l['took'] )
+                aggs[uid][i]['tooks_millis'].append(l['took_millis'])
+                aggs[uid][i]['shards_n'] = len(aggs[uid][i]['shards'])
+                aggs[uid][i]['tooks_min'] = min(aggs[uid][i]['tooks_millis'])
+                aggs[uid][i]['tooks_max'] = max(aggs[uid][i]['tooks_millis'])
+                # check if max number of shards has been reached
+                if int(aggs[uid][i]['shards_n']) == int(aggs[uid][i]['total_shards']):
+                    fin = aggs[uid].pop(i)
+                    done.setdefault(uid, []).append(fin)
+        else:
+            # new event
+            aggs[uid] = [ create_agg(l) ]
+            # print (host, '{0:.3f}'.format(datetime_object.timestamp()), slowlog_type, md5, shard + "/" + total_shards)
+
+# pprint(aggs)
+for i in (aggs.items(), done.items()):
+    for key, value in i:
+        # if len(value) > 2:
+        for i in value:
+            if i['slowlog_type'] == 'query':
+                span = (max(i['ts_s']) - min(i['ts_s']))/1000
+                time = "%s   %s" % (max(i['datestamps'])[11:], min(i['datestamps'])[11:])
+                print('{:35s} {:5s} {:5} {:>10.3f} {:>30}'.format(i['md5'], i['slowlog_type'], i['shards_n'], span, time))
+
+            # print('{:35s} {:8s} {:<8} {:<.3f} {} {}'.format(i['md5'], i['slowlog_type'], i['shards_n'], span, i['tooks_max'],i['tooks_min']))
+            # print(i['md5'],i['slowlog_type'],i['shards_n'],i['ts'],i['tooks_max'],i['tooks_min'])
+print(len(done.keys()))
+
+# python 2
+# with nested(*(open(file) for file in filenames)) as handles:
+#     pprint(handles)
+#     #for line in (line for tuple in izip_longest(*handles) # python 2
+#     for line in (line for tuple in zip_longest(*handles)
+#                       for line in tuple if line):
+#         # print line.strip()
+        #
+        # # [2017-02-10 03:35:21,997][TRACE][index.search.slowlog.query] [172.16.0.15] [sp-data-20170124][7] took[5.9s], took_millis[5987], types[line-item-type], stats[], search_type[QUERY_THEN_FETCH], total_shards[32], source[{"query":{"match_all":{} },"size":0}], extra_source[{"timeout":90000}],
+        # regex = r'^\[(?P<datestamp>.*?)\]\[(?P<loglevel>.*?)\]\[index.search.slowlog.(?P<slowlog_type>.*?)\]\s?\[(?P<host>.*?)\]\s?\[(?P<index>.*?)\]\[(?P<shard>\d+)\]\s?took\[(?P<took>.*?)\],\s?took_millis\[(?P<took_millis>\d+)\],\s?types\[(?P<types>.*?)\],\s?stats\[(?P<stats>.*?)\], search_type\[(?P<search_type>.*?)\],\s?total_shards\[(?P<total_shards>\d+)\],\s?source\[(?P<query>.*?)\],\s?extra_source\[(?P<extra_source>.*?)\],?'
+        # mo = re.search(regex, line.strip())
+        # datestamp,loglevel,slowlog_type,host,index,shard,took,took_millis,types,stats,search_type,total_shards,query,extra_source = mo.groups()
+        # datetime_object = datetime.strptime('datestamp', '%Y-%m-%d %H:%M:%S,%f')
+        # md5 = hashlib.md5(query).hexdigest()
+        # # print(mo.groups())
+        # # print mo.group('datestamp'), mo.group('listener'), mo.group('host')
+        # print (host, datestamp, slowlog_type, md5, shard + "/" + total_shards)
