@@ -1,8 +1,5 @@
 .vagrant/
-certs/
 tmp/
-provisioning/roles/elasticsearch
-provisioning/playbook.retry
 
 # Compiled source #
 ###################
@@ -12,6 +9,7 @@ provisioning/playbook.retry
 *.exe
 *.o
 *.so
+*.pyc
 
 # OS generated files #
 ######################

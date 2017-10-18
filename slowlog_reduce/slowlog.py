@@ -35,9 +35,9 @@ import gzip
 
 
 logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 ch = logging.StreamHandler(sys.stdout)
-ch.setLevel(logging.DEBUG)
+ch.setLevel(logging.INFO)
 logger.addHandler(ch)
 
 parser = argparse.ArgumentParser(
@@ -134,8 +134,10 @@ def Main():
             metadata=data['metadata']
         )
         # print(r.failures)
-    # es_index()
-    # printer()
+
+    # TODO: write to elasticsearch (needs mappings to be fixed at some point)
+    # es_index(r)
+
     print_table(args.columns, r)
 
 
@@ -436,18 +438,18 @@ def print_table(columns, data, column_separator="   ", replace_space_char = None
 
         x = i['query'].split('highlight')[0]
         if '*' in x:
-        # if int(i['tooks_max']) > 30000:
+            if int(i['tooks_max']) > 30000:
         # if any(x in i['query'] for x in ('wildcard', 'regexp')):
-            table.print_line(
-                i['md5'][-5:],
-                i['slowlog_type'],
-                i['tooks_max'],
-                datetime.utcfromtimestamp(float(i['ts_min']/1000)).strftime("%H:%M:%S.%f")[:-3],
-                (i['extra_source']+str(i['tooks'])),
-                # x
-                i['query']
-                # truncated_query
-            )
+                table.print_line(
+                    i['md5'][-5:],
+                    i['slowlog_type'],
+                    i['tooks_max'],
+                    datetime.utcfromtimestamp(float(i['ts_min']/1000)).strftime("%H:%M:%S.%f")[:-3],
+                    (i['extra_source']+str(i['tooks'])),
+                    # x
+                    i['query']
+                    # truncated_query
+                )
             # print('')
         # print(', '.join(map(str, i['ts_s'])))
         # print(', '.join(map(str, i['datestamps'])))
@@ -456,14 +458,14 @@ def print_table(columns, data, column_separator="   ", replace_space_char = None
     logger.info(data.metadata)
 
 
-def es_index():
+def es_index(data):
     from elasticsearch import Elasticsearch, helpers
     es = Elasticsearch(
         ['http://elastic:changeme@localhost:9200/'],
     )
 
     k = ({'_type': 'my_type', '_index': 'slowlog', '_source': item}
-         for item in r.results)
+         for item in data.results)
     # print(list(k))
 
     # mapping = '''

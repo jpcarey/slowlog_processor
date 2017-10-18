@@ -31,34 +31,37 @@ class LineProcessor():
 
     def grok(self, line):
         try:
+            # =< elasticsearch 2.3
+            # regex = re.compile(
+            #     r'^\[(?P<datestamp>.*?)\]'
+            #     r'\[(?P<loglevel>.*?)\]'
+            #     r'\[index.search.slowlog.(?P<slowlog_type>.*?)\]\s?'
+            #     r'\[(?P<index>.*?)\]'
+            #     r'took\[(?P<took>.*?)\],\s?'
+            #     r'took_millis\[(?P<took_millis>\d+)\],\s?'
+            #     r'types\[(?P<types>.*?)\],\s?'
+            #     r'stats\[(?P<stats>.*?)\], '
+            #     r'search_type\[(?P<search_type>.*?)\],\s?'
+            #     r'total_shards\[(?P<total_shards>\d+)\],\s?'
+            #     r'source\[(?P<query>.*?)\],\s?'
+            #     r'extra_source\[(?P<extra_source>.*?)\],?'
+            #     )
             regex = re.compile(
                 r'^\[(?P<datestamp>.*?)\]'
                 r'\[(?P<loglevel>.*?)\]'
                 r'\[index.search.slowlog.(?P<slowlog_type>.*?)\]\s?'
+                r'\[(?P<host>.*?)\]\s?'
                 r'\[(?P<index>.*?)\]'
-                r'took\[(?P<took>.*?)\],\s?'
-                r'took_millis\[(?P<took_millis>\d+)\],\s?'
-                r'types\[(?P<types>.*?)\],\s?'
-                r'stats\[(?P<stats>.*?)\], '
-                r'search_type\[(?P<search_type>.*?)\],\s?'
-                r'total_shards\[(?P<total_shards>\d+)\],\s?'
-                r'source\[(?P<query>.*?)\],\s?'
-                r'extra_source\[(?P<extra_source>.*?)\],?'
-            )
-                # r'^\[(?P<datestamp>.*?)\]'
-                # r'\[(?P<loglevel>.*?)\]'
-                # r'\[index.search.slowlog.(?P<slowlog_type>.*?)\]\s?'
-                # r'\[(?P<host>.*?)\]\s?'
-                # r'\[(?P<index>.*?)\]'
-                # r'\[(?P<shard>\d+)\]\s?took'
-                # r'\[(?P<took>.*?)\],\s?took_millis'
-                # r'\[(?P<took_millis>\d+)\],\s?types'
-                # r'\[(?P<types>.*?)\],\s?stats'
-                # r'\[(?P<stats>.*?)\], search_type'
-                # r'\[(?P<search_type>.*?)\],\s?total_shards'
-                # r'\[(?P<total_shards>\d+)\],\s?source'
-                # r'\[(?P<query>.*?)\],\s?extra_source'
-                # r'\[(?P<extra_source>.*?)\],?'
+                r'\[(?P<shard>\d+)\]\s?took'
+                r'\[(?P<took>.*?)\],\s?took_millis'
+                r'\[(?P<took_millis>\d+)\],\s?types'
+                r'\[(?P<types>.*?)\],\s?stats'
+                r'\[(?P<stats>.*?)\], search_type'
+                r'\[(?P<search_type>.*?)\],\s?total_shards'
+                r'\[(?P<total_shards>\d+)\],\s?source'
+                r'\[(?P<query>.*?)\],\s?extra_source'
+                r'\[(?P<extra_source>.*?)\],?'
+                )
 
             match = re.search(regex, line)
             grokked = match.groupdict()
