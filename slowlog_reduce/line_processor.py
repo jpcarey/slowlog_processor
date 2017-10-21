@@ -10,7 +10,9 @@ from collections import Counter
 logger = logging.getLogger(__name__)
 
 class LineProcessor():
-
+    """
+    Parse single log line and collate together
+    """
     offsets = dict()
     aggs = dict()
     errors = []
@@ -30,22 +32,13 @@ class LineProcessor():
 
 
     def grok(self, line):
+        """
+        Parse slowlog line
+            md5 hash query body
+            create unique id (uid)
+            creates usable timestamp
+        """
         try:
-            # =< elasticsearch 2.3
-            # regex = re.compile(
-            #     r'^\[(?P<datestamp>.*?)\]'
-            #     r'\[(?P<loglevel>.*?)\]'
-            #     r'\[index.search.slowlog.(?P<slowlog_type>.*?)\]\s?'
-            #     r'\[(?P<index>.*?)\]'
-            #     r'took\[(?P<took>.*?)\],\s?'
-            #     r'took_millis\[(?P<took_millis>\d+)\],\s?'
-            #     r'types\[(?P<types>.*?)\],\s?'
-            #     r'stats\[(?P<stats>.*?)\], '
-            #     r'search_type\[(?P<search_type>.*?)\],\s?'
-            #     r'total_shards\[(?P<total_shards>\d+)\],\s?'
-            #     r'source\[(?P<query>.*?)\],\s?'
-            #     r'extra_source\[(?P<extra_source>.*?)\],?'
-            #     )
             regex = re.compile(
                 r'^\[(?P<datestamp>.*?)\]'
                 r'\[(?P<loglevel>.*?)\]'
@@ -85,12 +78,14 @@ class LineProcessor():
                 )
 
             if LineProcessor.offsets:
-                grokked['ts_millis'] = grokked['ts_millis'] #+ LineProcessor.offsets[grokked['host']]
+                grokked['ts_millis'] = grokked['ts_millis'] + LineProcessor.offsets[grokked['host']]
                 LineProcessor.stats['offsets'] += 1
             LineProcessor.stats['grok_success'] += 1
             # expand named capture
             for name, value in grokked.items():
                 setattr(self, name, value)
+
+            self.collate_line()
 
         except AttributeError as e:
             LineProcessor.stats['grok_failed'] += 1
@@ -118,9 +113,36 @@ class LineProcessor():
     #         pass
 
 
+    def collate_line(self):
+        """
+        Compare each line to try to collate matching queries together
+        """
+        if self.uid in LineProcessor.aggs:
+            nearest = dict()
+            for i, x in enumerate(LineProcessor.aggs[self.uid]):
+                # less than two items = +- 10s, more than two items use the max took time * 2
+                threshold = 10000 if len(x['tooks_max']) <= 2 else int(x['tooks_max'])*2
+                if self.ts_millis in range(x['ts_min']-threshold, x['ts_max']+threshold):
+                    if self.shard in x['shards']:
+                        continue
+                    # # loop through array and build nearest matching agg
+                    nearest[i] = min(x['ts_s'], key=lambda x: abs(x - self.ts_millis))
+            # shard is already in agg item, create new
+            if not nearest:
+                self.create_agg()
+            else:
+                match = min(nearest, key=lambda x: abs(x - self.ts_millis))
+                # check if match is in time window
+                self.append_agg(match)
+        else:
+            self.create_agg()
+
+
     def create_agg(self):
-        # creates the base aggregated event
-        LineProcessor.aggs.setdefault(self.uid, []).append({
+        """
+        Create new aggregated slowlog item
+        """
+        LineProcessor.aggs.setdefault(self.uid,[]).append({
             'ts': self.ts_millis,
             'ts_s': [ self.ts_millis ],
             'md5': self.md5,
@@ -147,29 +169,29 @@ class LineProcessor():
 
 
     def append_agg(self, i):
-        # TODO: check if shard number is already in agg?
-        # (currently does the check in read_logs() )
-        # move all logic into append
-        LineProcessor.aggs[self.uid][i]['ts_s'].append(self.ts_millis)
-        LineProcessor.aggs[self.uid][i]['datestamps'].append(self.datestamp)
-        # LineProcessor.aggs[self.uid][i]['hosts'].append(self.host)
-        LineProcessor.aggs[self.uid][i]['shards'].append(self.shard)
-        LineProcessor.aggs[self.uid][i]['tooks'].append(self.took)
-        LineProcessor.aggs[self.uid][i]['tooks_millis'].append(self.took_millis)
-        LineProcessor.aggs[self.uid][i]['shards_n'] = len(LineProcessor.aggs[self.uid][i]['shards'])
-        LineProcessor.aggs[self.uid][i]['tooks_min'] = min(LineProcessor.aggs[self.uid][i]['tooks_millis'])
-        LineProcessor.aggs[self.uid][i]['tooks_max'] = max(LineProcessor.aggs[self.uid][i]['tooks_millis'])
-        LineProcessor.aggs[self.uid][i]['ts_min'] = min(LineProcessor.aggs[self.uid][i]['ts_s'])
-        LineProcessor.aggs[self.uid][i]['ts_max'] = max(LineProcessor.aggs[self.uid][i]['ts_s'])
-        # check if max number of shards has been reached
-        # if int(aggs[self.uid][i]['shards_n']) == int(aggs[self.uid][i]['total_shards']):
-        #     fin = aggs[self.uid].pop(i)
-        #     done.setdefault(self.uid, []).append(fin)
+        """
+        Add current log line to existing aggregated slowlog item
+        """
+        item = LineProcessor.aggs[self.uid][i]
+
+        item['ts_s'].append(self.ts_millis)
+        item['datestamps'].append(self.datestamp)
+        # item['hosts'].append(self.host)
+        item['shards'].append(self.shard)
+        item['tooks'].append(self.took)
+        item['tooks_millis'].append(self.took_millis)
+        item['shards_n'] = len(item['shards'])
+        item['tooks_min'] = min(item['tooks_millis'])
+        item['tooks_max'] = max(item['tooks_millis'])
+        item['ts_min'] = min(item['ts_s'])
+        item['ts_max'] = max(item['ts_s'])
 
 
     @staticmethod
     def time_align(file):
-        # calculates timeoffsets from master node, sourced from nodes_stats diag
+        """
+        calculates timeoffsets from master node, sourced from nodes_stats diag
+        """
         with open(file) as json_data:
             d = json.load(json_data)
             master = dict(((k, v) for k, v in d["nodes"].items()
@@ -200,4 +222,8 @@ class LineProcessor():
 
 
     def __del__(self):
+        """
+        Remove each line instance when finished
+        """
+        # TODO: check if this is necessary. Trying to keep memory footprint down.
         pass
